@@ -6,7 +6,7 @@
   - MaiBotBridgeManager.exe 来自 bridge-manager/bridge_manager.py
   - log_tail.exe            来自 bridge-manager/log_tail.py
 
-产物：dist/WeChatOneBotBridge-v1.0.0.zip
+产物：dist/WeChatOneBotBridge-v{VERSION}.zip
 """
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 PYTHON = Path(sys.executable)
 
-VERSION = "1.1.0"
+VERSION = "1.1.1"
 PKG_NAME = f"WeChatOneBotBridge-v{VERSION}"
 
 
@@ -80,8 +80,24 @@ def pyi(src: Path, name: str, workdir: Path, onefile: bool = True, windowed: boo
 
 def build_bridge() -> None:
     step("打包 bridge.exe")
+    webui_dist = ROOT / "webui" / "dist"
+    if not webui_dist.exists():
+        raise SystemExit(
+            f"缺少前端构建产物 {webui_dist}，请先在 webui/frontend 里 npm run build"
+        )
     extras = [
         "--add-data", f"{BRIDGE_SRC / 'config.example.json'};.",
+        # webui 包在仓库根（bridge/ 的上一级），需要显式加入分析路径，
+        # 否则 PyInstaller 找不到 `from webui.app import ...`，打出来的
+        # bridge.exe 启动即报 ModuleNotFoundError: No module named 'webui'
+        "--paths", str(ROOT),
+        "--hidden-import", "webui",
+        "--hidden-import", "webui.app",
+        "--hidden-import", "webui.monitor",
+        # 前端静态文件（FastAPI StaticFiles 直接读文件系统，必须作为数据打入）
+        "--add-data", f"{webui_dist};webui/dist",
+        # uvicorn 的 loops/protocols 等是运行时动态 import 的
+        "--collect-submodules", "uvicorn",
         # 隐藏 import（PyInstaller 默认按 import 追踪，一些动态加载需要手动加）
         "--hidden-import", "websockets",
         "--hidden-import", "comtypes.gen",
@@ -119,8 +135,14 @@ def assemble_zip() -> Path:
         if src.exists():
             shutil.copy2(src, rel / fname)
 
-    # 2) 配置文件
-    shutil.copy2(BRIDGE_SRC / "config.example.json", rel / "config.json")
+    # 2) 配置文件（先校验 JSON 合法性，避免把损坏的 config 打进发布包）
+    import json
+    cfg_src = BRIDGE_SRC / "config.example.json"
+    try:
+        json.loads(cfg_src.read_text(encoding="utf-8-sig"))
+    except Exception as exc:
+        raise SystemExit(f"config.example.json 不是合法 JSON，已中止打包: {exc}")
+    shutil.copy2(cfg_src, rel / "config.json")
 
     # 3) 启动脚本（双击启动管理器）
     (rel / "启动.bat").write_text(
@@ -155,6 +177,11 @@ start "" MaiBotBridgeManager.exe
 
 
 def main() -> int:
+    # Windows 控制台默认 GBK，输出 emoji 会抛 UnicodeEncodeError
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
     t0 = time.time()
     DIST.mkdir(exist_ok=True)
     clean()

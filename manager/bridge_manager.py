@@ -270,6 +270,8 @@ class BridgeController:
         if not IS_WINDOWS:
             return
         try:
+            # 先停掉旧的 log_tail，避免重复启动残留多个进程占着 bridge.log
+            self._stop_log_tail()
             flags = subprocess.CREATE_NO_WINDOW
             # 打包后：直接调 log_tail.exe；源码：调 python log_tail.py
             if LOG_TAIL_EXE.exists():

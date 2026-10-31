@@ -47,11 +47,33 @@ def _token_ok(connection, request):
     expected = f"Bearer {config.OB_SERVER_TOKEN}"
     if auth == expected:
         return None
-    # 也兼容 ?access_token= 形式
-    qs = request.query
-    if qs and qs.get("access_token") == config.OB_SERVER_TOKEN:
+    # 也兼容 ?access_token= 形式。
+    # 新版 websockets（asyncio 实现）的 Request 只有 .path（含 query 串），
+    # 没有 .query 属性，需自行解析；旧版兼容层有 .query，两种都支持。
+    token = None
+    try:
+        from urllib.parse import parse_qs, urlsplit
+        qs = getattr(request, "query", None)
+        if isinstance(qs, dict):
+            # 旧版兼容层：request.query 已是 dict
+            token = qs.get("access_token")
+            if isinstance(token, list):
+                token = token[0] if token else None
+        else:
+            # 新版：从 request.path 解析 query string
+            token = parse_qs(urlsplit(request.path or "").query).get(
+                "access_token", [None]
+            )[0]
+    except Exception:
+        token = None
+    if token and token == config.OB_SERVER_TOKEN:
         return None
     log.warning(f"[OB11] 鉴权失败: Authorization={auth!r}")
+    # websockets>=13 推荐 connection.respond()（自动带 Connection: close）；
+    # 旧版手动构造 Response。
+    respond = getattr(connection, "respond", None)
+    if callable(respond):
+        return respond(401, "Unauthorized")
     from websockets.http11 import Response
     from websockets.datastructures import Headers
     return Response(401, "Unauthorized", Headers({"Connection": "close"}), b"Unauthorized")
