@@ -218,10 +218,18 @@ class UiaSender(BaseSender):
 
     def _find_window(self):
         """定位微信主窗口：优先绑定 config.wechat_hwnd 指定的窗口（多开场景），
-        未配置或已失效则回退到按标题自动查找（取第一个）。"""
+        未配置或已失效则回退自动查找。
+
+        新版微信（4.x，进程名 Weixin.exe）适配：
+        1. 用 enum_wechat_windows() 做进程名（Weixin.exe/WeChat.exe）+ Qt 类名
+           双重校验，不会误绑浏览器标签页、小程序窗口等同名窗口；
+           类名匹配用 "QWindowIcon" 子串而非写死 Qt 版本号（如
+           Qt51514QWindowIcon），微信升级 Qt 版本后仍然有效。
+        2. 保持 UIA 顶层窗口的原始顺序选取第一个通过校验的窗口（与旧版行为
+           一致，多开时与历史版本选择相同）；需要指定实例时用
+           config.wechat_hwnd 或 WebUI「识别窗口」绑定。
+        """
         auto = self._auto
-        root = auto.GetRootControl()
-        children = list(root.GetChildren())
 
         target = 0
         try:
@@ -229,6 +237,41 @@ class UiaSender(BaseSender):
         except (TypeError, ValueError):
             target = 0
 
+        # 先枚举所有「经验证是微信进程」的窗口句柄
+        try:
+            wins = enum_wechat_windows()
+        except Exception as e:
+            log.warning(f"枚举微信窗口失败: {e}")
+            wins = []
+        verified = {w["hwnd"]: w for w in wins}
+
+        if target and verified:
+            if target in verified:
+                ctrl = auto.ControlFromHandle(target)
+                if ctrl and ctrl.Exists(0.3):
+                    self._window = ctrl
+                    log.info(f"使用配置的微信窗口 hwnd={target} (pid={verified[target]['pid']})")
+                    return
+            log.warning(f"配置的微信窗口 hwnd={target} 已失效，回退自动查找")
+
+        # 按 UIA 顶层窗口顺序，取第一个通过进程校验的微信窗口
+        root = auto.GetRootControl()
+        children = list(root.GetChildren())
+
+        for w in children:
+            try:
+                if w.NativeWindowHandle in verified:
+                    self._window = w
+                    if len(verified) > 1:
+                        log.warning(
+                            f"检测到 {len(verified)} 个微信窗口，已选择 hwnd={w.NativeWindowHandle}；"
+                            f"如需指定请在 config.json 设置 wechat_hwnd 或在 WebUI 绑定"
+                        )
+                    return
+            except Exception:
+                continue
+
+        # 回退：无进程校验结果时按标题匹配（保持旧版兜底行为）
         if target:
             for w in children:
                 try:
